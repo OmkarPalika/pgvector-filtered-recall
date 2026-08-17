@@ -21,7 +21,9 @@ import time
 
 from bench import DATA, K, assert_plan, recall, set_guc, to_literal
 
-COLUMNS = ["bucket", "bucket_corr"]
+COLUMNS = ["bucket", "bucket_corr", "bucket_multi"]
+LAYOUTS = {"bucket": "uniform", "bucket_corr": "correlated",
+           "bucket_multi": "multicluster"}
 ARMS = ["near", "far"]
 SELECTIVITIES = [10, 1]  # 1% and 0.1%
 NQ = 100
@@ -44,24 +46,45 @@ def main(dsn, out):
     import numpy as np
     import psycopg
 
+    with psycopg.connect(dsn, autocommit=True) as probe:
+        n_rows = probe.execute("SELECT count(*) FROM items").fetchone()[0]
+
+    from load import anchor_indices
+
     with h5py.File(DATA) as f:
-        anchor = f["train"][0]                      # same anchor load.py ranks against
         test = f["test"][:]
-    d = ((test - anchor) ** 2).sum(1)
-    order = np.argsort(d)
-    arms = {"near": [to_literal(test[i]) for i in order[:NQ]],
-            "far": [to_literal(test[i]) for i in order[-NQ:]]}
+        # bucket_multi ranks within several clusters, so "near" means near any of them.
+        # Read just the anchor rows rather than the whole training set.
+        anchor_sets = {"bucket_multi": f["train"][anchor_indices(n_rows)],
+                       "bucket_corr": f["train"][0:1],
+                       "bucket": f["train"][0:1]}
+
+    def arms_for(col):
+        """Nearest/furthest test vectors relative to that column's anchors.
+
+        For `bucket` the anchors are meaningless — the attribute is independent of
+        position — but using the same split keeps it an honest control rather than a
+        differently-sampled query set.
+        """
+        d = np.min([((test - a) ** 2).sum(1) for a in anchor_sets[col]], axis=0)
+        order = np.argsort(d)
+        return {"near": [to_literal(test[i]) for i in order[:NQ]],
+                "far": [to_literal(test[i]) for i in order[-NQ:]]}
 
     with psycopg.connect(dsn, autocommit=True) as conn:
         cur = conn.cursor()
         cur.execute("LOAD 'vector'")
-        if not cur.execute("SELECT 1 FROM information_schema.columns WHERE "
-                           "table_name='items' AND column_name='bucket_corr'").fetchone():
-            sys.exit("items.bucket_corr missing — rerun load.py")
+        have = {r[0] for r in cur.execute(
+            "SELECT column_name FROM information_schema.columns "
+            "WHERE table_name='items'").fetchall()}
+        missing = [c for c in COLUMNS if c not in have]
+        if missing:
+            sys.exit(f"items is missing {missing} — rerun load.py")
 
         rows = []
         for col in COLUMNS:
             q_sql = query_for(col)
+            arms = arms_for(col)
             for arm in ARMS:
                 queries = arms[arm]
                 for sel in SELECTIVITIES:
@@ -96,7 +119,7 @@ def main(dsn, out):
 
                         r = {
                             "column": col,
-                            "layout": "uniform" if col == "bucket" else "correlated",
+                            "layout": LAYOUTS[col],
                             "arm": arm,
                             "selectivity_pct": pct,
                             "config": cfg_name,
@@ -107,7 +130,7 @@ def main(dsn, out):
                             "n_queries": len(queries),
                         }
                         rows.append(r)
-                        print(f"  {r['layout']:10s} {arm:4s} {pct:5.1f}% {cfg_name:8s} "
+                        print(f"  {r['layout']:12s} {arm:4s} {pct:5.1f}% {cfg_name:8s} "
                               f"recall={r['recall_mean']:.3f} "
                               f"rows={r['rows_returned_mean']:5.2f} "
                               f"p50={r['p50_ms']:7.2f}ms p95={r['p95_ms']:8.2f}ms")

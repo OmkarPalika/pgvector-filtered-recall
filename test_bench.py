@@ -23,7 +23,38 @@ def main():
     assert to_literal([1.0, 2.5]) == "[1,2.5]"
 
     check_correlated_buckets()
+    check_multicluster_buckets()
     print("ok")
+
+
+def check_multicluster_buckets():
+    """Selectivity must stay N/1000 while the region becomes several balls. If the
+    per-cluster ranking is wrong the buckets skew and every cell measures a different
+    selectivity than it reports."""
+    try:
+        import numpy as np
+    except ImportError:
+        return
+    from load import BUCKETS, anchor_indices, multicluster_buckets
+
+    rng = np.random.default_rng(1)
+    # Four tight, well-separated blobs.
+    train = np.vstack([rng.normal(c * 100, 1.0, (2000, 8)) for c in range(4)]
+                      ).astype(np.float32)
+    multi = multicluster_buckets(train, n_clusters=4)
+
+    counts = np.bincount(multi, minlength=BUCKETS)
+    assert counts.min() == counts.max() == len(train) // BUCKETS, f"skewed: {counts}"
+
+    # The selected region must draw from every cluster, not concentrate in one.
+    # That is the whole difference from the single-ball attribute.
+    blob = np.repeat(np.arange(4), 2000)
+    selected = blob[multi < 100]                       # innermost 10%
+    assert len(np.unique(selected)) == 4, "region should span all clusters"
+    assert np.bincount(selected).min() == 200, "each cluster contributes its own share"
+
+    assert len(anchor_indices(1000, 4)) == 4
+    assert len(set(anchor_indices(1000, 4))) == 4, "anchors must be distinct"
 
 
 def check_correlated_buckets():

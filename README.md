@@ -171,37 +171,61 @@ anchor so `bucket_corr < N` is a compact ball holding exactly the same N/1000 of
 table. Mean distance to the anchor is 253 for the correlated subset against 506 for the
 uniform one.
 
-Where the query sits relative to that ball decides the outcome. Both cases, 1M rows,
-`recall@10` and rows returned out of 10 requested:
+`bucket_multi` goes one step further: it ranks within each of 8 clusters, so the region
+is 8 separated balls — a tenant is several topics, not one. Selectivity is unchanged and
+the two regions do not overlap at all.
+
+What decides the outcome is where the query sits relative to that region. `recall@10` at
+1M rows, rows returned out of the 10 requested in parentheses:
 
 | layout | query | selectivity | default | recipe |
 |---|---|---|---|---|
-| uniform | near | 0.1% | 0.003 (0.03 rows) | 1.000, 183ms |
-| uniform | far | 0.1% | 0.002 (0.02 rows) | 0.999, 160ms |
-| correlated | near | 0.1% | **0.471** (4.82 rows) | 0.945, 7ms |
-| correlated | near | 1.0% | **0.913** (9.83 rows) | 0.922, 4ms |
-| correlated | far | 0.1% | **0.000** (0 rows) | **0.000, 702ms** |
-| correlated | far | 1.0% | **0.000** (0 rows) | **0.000, 765ms** |
+| uniform | near | 0.1% | 0.003 (0.03) | 1.000 |
+| multicluster | near | 0.1% | 0.223 (2.24) | 0.996 |
+| correlated | near | 0.1% | **0.462** (4.72) | 0.946 |
+| uniform | near | 1.0% | 0.051 (0.51) | 0.995 |
+| multicluster | near | 1.0% | 0.771 (7.85) | 0.980 |
+| correlated | near | 1.0% | **0.913** (9.84) | 0.922 |
+| uniform | far | 0.1% | 0.002 (0.02) | 0.999 |
+| multicluster | far | 0.1% | **0.000** (0) | 0.685 (9.28) |
+| correlated | far | 0.1% | **0.000** (0) | **0.000** (0) |
+| uniform | far | 1.0% | 0.028 (0.28) | 0.999 |
+| multicluster | far | 1.0% | **0.000** (0) | 0.959 |
+| correlated | far | 1.0% | **0.000** (0) | **0.000** (0) |
 
-Three things follow, and they cut in opposite directions:
+Reading down the near rows: the more the filter attribute clusters, the better stock
+pgvector does, by two orders of magnitude between uniform and single-ball. The filtered
+rows are where the graph walk already goes, so candidates survive the predicate instead
+of being discarded. A uniform benchmark badly understates ordinary in-tenant search.
 
-- **Searching inside your own region is far better than a uniform benchmark suggests.**
-  0.471 against 0.003 on stock settings. The filtered rows are where the graph walk
-  already goes, so candidates survive the predicate instead of being discarded.
-- **The fix is much cheaper there too** — 0.471 to 0.945 for 3.7ms to 7.2ms, against
-  183ms to do the same job on uniform data.
-- **Searching outside the region fails completely, and the fix makes it worse.** Zero
-  rows at every setting, and `relaxed_order` spends 700ms+ to return nothing where the
-  default fails in 3.5ms. Confirmed by EXPLAIN: `Rows Removed by Filter: 101373`, the
-  entire `max_scan_tuples` budget spent, no row surviving the predicate.
+Reading down the far rows gives the opposite, and it is the important one:
 
-That last row is a query for something the tenant does not have, which is ordinary. It
-means **the queries that return nothing are the most expensive queries in the system**,
-and combined with ~16MB of scan memory each, a burst of no-match searches is the worst
-load this configuration can be given: peak memory, peak latency, no results.
+**On stock settings, a query whose neighbourhood lies outside the filtered region
+returns zero rows — not degraded results, zero — while an exact scan returns ten.**
 
-So a uniform filter attribute is not a conservative simplification. It sits between two
-real behaviours and describes neither.
+That holds for both realistic layouts, one cluster or eight. Only the uniform attribute
+hides it, reporting 0.002, which still reads as merely poor recall rather than total
+failure. Confirmed directly by EXPLAIN on a single far query:
+`Rows Removed by Filter: 101373` — the whole `max_scan_tuples` budget spent, not one row
+surviving the predicate, 0 returned in 633ms against an exact scan's 10.
+
+The recipe rescues this only when the region is scattered: 0.959 and 0.685 for eight
+clusters, still 0.000 for one distant ball. Some cluster is always reachable within the
+scan budget when there are eight; when there is one and it is far, none is.
+
+A query for something the tenant does not have is ordinary. So the queries that return
+nothing are among the most expensive in the system, and at ~16MB of scan memory each a
+burst of no-match searches is the worst load this configuration can be given: peak
+memory, peak latency, no results.
+
+A uniform filter attribute is therefore not a conservative simplification. It sits
+between real behaviours and describes none of them.
+
+**Latency caveat.** The three-layout run was executed while the host sat at 100% CPU
+from unrelated work — the same run's HNSW build took 1645s against 488s for an identical
+earlier build. Recall reproduced across both runs (0.462 vs 0.471 for correlated/near at
+0.1%), so the recall column is sound, but no latency figure from that run is quoted here.
+The timings in the sections above come from runs on a quiet machine.
 
 ## Dataset
 
@@ -213,10 +237,13 @@ of measure), so ANN recall on them is meaningless and does not resemble real emb
 
 Stated up front, because a benchmark that hides these is not worth reading.
 
-- **Two filter attributes, both synthetic.** `bucket` is uniform and independent of
-  vector position; `bucket_corr` is a compact ball around a fixed anchor. Real
-  attributes sit somewhere between a single ball and many scattered clusters, and a
-  multi-cluster attribute is the obvious next one to add.
+- **Three filter attributes, all synthetic.** `bucket` is uniform and independent of
+  vector position, `bucket_corr` is one compact ball, `bucket_multi` is 8 separated
+  clusters. Real attributes vary in how tightly they cluster, and the results move a
+  long way across that range, so treat the three as bracketing rather than predicting.
+- **Build timings vary far more than query results.** The same 1M HNSW build took 469s,
+  488s and 1645s on three runs of identical data and parameters, tracking host load.
+  Recall figures reproduced across the same runs.
 - **Client-side timing.** Latency includes driver and loopback round-trip. Consistent
   across cells, so comparisons hold; absolute numbers are not server-side timings.
 - **Single node, laptop-class hardware.** Relative behaviour is the finding, not throughput.

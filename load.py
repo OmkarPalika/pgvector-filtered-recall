@@ -13,6 +13,7 @@ URL = "https://ann-benchmarks.com/sift-128-euclidean.hdf5"
 DATA = os.path.join("data", "sift-128-euclidean.hdf5")
 BUCKETS = 1000
 SEED = 42
+N_CLUSTERS = 8
 
 # The host 403s the default Python-urllib user agent. Any other UA is accepted,
 # so identify the project honestly rather than impersonating a browser.
@@ -76,6 +77,46 @@ def correlated_buckets(train):
     return corr
 
 
+def anchor_indices(n, n_clusters=N_CLUSTERS):
+    """Row ids of the cluster anchors. Shared with bench_corr.py so both sides agree
+    on where the clusters are without reloading the full training set."""
+    return np.sort(np.random.default_rng(SEED).choice(n, n_clusters, replace=False))
+
+
+def sq_dists(chunk, anchor):
+    diff = chunk - anchor
+    return np.einsum("ij,ij->i", diff, diff)
+
+
+def multicluster_buckets(train, n_clusters=N_CLUSTERS):
+    """Bucket by rank within the nearest of several anchors.
+
+    One ball (correlated_buckets) is the easy shape: a tenant is really several topic
+    clusters scattered across the space. Ranking within each cluster and interleaving
+    means `bucket_multi < N` takes the innermost N/1000 of every cluster, so the
+    filtered region is n_clusters separated balls at unchanged selectivity.
+    """
+    anchors = train[anchor_indices(len(train), n_clusters)].astype(np.float32)
+
+    assign = np.empty(len(train), dtype=np.int16)
+    dist = np.empty(len(train), dtype=np.float32)
+    for i in range(0, len(train), 100_000):
+        chunk = train[i:i + 100_000].astype(np.float32)
+        # One anchor at a time: chunk[:, None, :] - anchors would allocate
+        # 100k x n_clusters x 128 floats.
+        d = np.stack([sq_dists(chunk, a) for a in anchors], axis=1)
+        assign[i:i + 100_000] = d.argmin(1)
+        dist[i:i + 100_000] = d.min(1)
+
+    out = np.empty(len(train), dtype=np.int32)
+    for c in range(n_clusters):
+        members = np.flatnonzero(assign == c)
+        # Rank within the cluster, so each cluster contributes its own N/1000 share.
+        out[members[np.argsort(dist[members])]] = (
+            np.arange(len(members)) * BUCKETS // len(members))
+    return out
+
+
 def load(dsn, rows):
     with h5py.File(DATA) as f:
         train = f["train"][:rows]
@@ -84,6 +125,7 @@ def load(dsn, rows):
     # Seeded so the filter attribute is identical across runs and machines.
     buckets = np.random.default_rng(SEED).integers(0, BUCKETS, size=len(train))
     corr = correlated_buckets(train)
+    multi = multicluster_buckets(train)
 
     with psycopg.connect(dsn) as conn:
         with conn.cursor() as cur:
@@ -92,10 +134,11 @@ def load(dsn, rows):
             conn.commit()
 
             t = time.perf_counter()
-            with cur.copy(
-                    "COPY items (id, bucket, bucket_corr, embedding) FROM STDIN") as cp:
+            with cur.copy("COPY items (id, bucket, bucket_corr, bucket_multi, "
+                          "embedding) FROM STDIN") as cp:
                 for i, v in enumerate(train):
-                    cp.write_row((i, int(buckets[i]), int(corr[i]), to_literal(v)))
+                    cp.write_row((i, int(buckets[i]), int(corr[i]), int(multi[i]),
+                                  to_literal(v)))
             conn.commit()
             print(f"copy: {time.perf_counter() - t:.1f}s")
 
