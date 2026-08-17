@@ -335,11 +335,42 @@ that column extends the range about eightfold. Above it, check EXPLAIN for the p
 actually get, because the choice flips without warning and one side of the flip can
 return nothing.
 
-**Latency caveat.** The three-layout run was executed while the host sat at 100% CPU
-from unrelated work — the same run's HNSW build took 1645s against 488s for an identical
-earlier build. Recall reproduced across both runs (0.462 vs 0.471 for correlated/near at
-0.1%), so the recall column is sound, but no latency figure from that run is quoted here.
-The timings in the sections above come from runs on a quiet machine.
+### Latency does not reproduce across index builds. Recall does.
+
+All of the above was re-run on an idle host (0–2% CPU, HNSW build 518s against 1645s for
+the same build under load) to replace timings taken while the machine was busy. Recall
+reproduced tightly — 0.463 against 0.462 and 0.471 for correlated/near at 0.1%, 0.224
+against 0.223 for multicluster/near. Latency did not:
+
+| cell | run 1 | run 2 (busy host) | run 3 (idle host) |
+|---|---|---|---|
+| uniform near 0.1% recipe | 183ms | 191ms | 328ms |
+| correlated far 0.1% recipe | 702ms | 2790ms | 1568ms |
+
+The idle host is *slower* than the busy one in places, so contention is not the
+explanation. Each reload builds a fresh HNSW graph with 4 parallel workers and the
+resulting graph differs every time. Recall is insensitive to that, latency is not.
+
+**So compare latencies within a run, not across runs.** Every timing quoted in this
+README comes from a single run and is reproducible to roughly a factor of two, while
+recall is reproducible to ±0.01. Pinning latency down further would need repeated builds
+per configuration, which this repo does not do.
+
+The comparisons that matter are all within-run anyway. From one idle-host run,
+`correlated`/far:
+
+| selectivity | plan | recall | p50 |
+|---|---|---|---|
+| 0.1% | bitmap+sort | 1.000 | 11.8ms |
+| 1.0% | hnsw | 0.000 | 1707ms |
+
+145x slower and returns nothing, same build and same queries. That contrast held in every
+run at every magnitude.
+
+One anomaly worth recording rather than hiding: `multicluster`/far at 0.1% scores 0.998
+on `bitmap+sort`, and an exact plan cannot miss rows. It is one query in 50 losing a
+single row to a distance tie broken differently between the two plans. Harmless, but an
+"exact" plan scoring under 1.0 should be explained, not glossed over.
 
 ## Dataset
 
