@@ -101,10 +101,35 @@ stops on memory instead, which is why 0.868 holds flat across a 20x range of tup
 budget. Only raising both lets the scan run to where the recall is.
 
 Tuning them one at a time — the ordinary way to tune anything — makes both look useless.
-Cost of moving both: about 1.7x p50 (101ms to ~170ms) to go from 0.868 to 0.973.
 
-At 1% selectivity every cell is 0.993 and neither cap binds. This interaction only
-appears below roughly 1%.
+### ef_search is the wrong knob
+
+With `max_scan_tuples` raised out of the way, sweeping `ef_search` over a 25x range
+changes almost nothing, at every memory setting:
+
+| `scan_mem_multiplier` | ef=40 | ef=1000 | p50 |
+|---|---|---|---|
+| 1 | 0.868 | 0.886 | ~98ms |
+| 2 | 0.973 | 0.977 | ~161ms |
+| 4 | **0.998** | 0.999 | ~217ms |
+
+25x more `ef_search` buys 0.018 recall. One step of `scan_mem_multiplier` buys 0.105.
+
+The three settings do different jobs, and only one of them is a tuning dial:
+
+- **`max_scan_tuples` is a gate.** Below the binding point nothing else can take effect;
+  above it, further increases do nothing whatsoever.
+- **`scan_mem_multiplier` is the dial.** 1 → 2 → 4 gives 0.868 → 0.973 → 0.998 at
+  98 → 161 → 217ms — a clean recall-for-latency trade.
+- **`ef_search` is inert under a selective filter.** Not weak, inert. It is also the
+  setting almost every tuning guide reaches for first.
+
+The ceiling is not structural. 0.998 recall at 0.1% selectivity on 1M rows is reachable
+for about 2.2x the default latency. The default configuration is simply the wrong one
+for filtered search.
+
+At 1% selectivity every cell is 0.993 and neither cap binds. All of this appears only
+below roughly 1%.
 
 ## Dataset
 

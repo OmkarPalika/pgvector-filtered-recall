@@ -18,13 +18,13 @@ from bench import DATA, K, QUERY, assert_plan, recall, set_guc, to_literal
 SELECTIVITIES = [10, 1]  # 1% and 0.1% — where iterative_scan stops being enough
 MSTS = [20_000, 50_000, 100_000, 200_000, 500_000, 1_000_000]
 SMMS = [1, 2]
+EFS = [40]  # flat while a cap binds; becomes worth sweeping once both are lifted
 MODE = "relaxed_order"
-EF = 40  # already shown to be flat here; holding it fixed isolates the two knobs
 NQ = 100
 WARMUP = 5
 
 
-def main(dsn, out):
+def main(dsn, out, sels, msts, smms, efs):
     import h5py
     import numpy as np
     import psycopg
@@ -40,7 +40,7 @@ def main(dsn, out):
         print(f"{n} rows")
 
         rows = []
-        for sel in SELECTIVITIES:
+        for sel in sels:
             pct = sel / 10.0
 
             set_guc(cur, "enable_seqscan", "on")
@@ -55,14 +55,13 @@ def main(dsn, out):
 
             print(f"\nselectivity {pct}%  (subset ~{int(n * sel / 1000)} rows)")
             set_guc(cur, "hnsw.iterative_scan", MODE)
-            set_guc(cur, "hnsw.ef_search", EF)
 
-            for smm in SMMS:
-                for mst in MSTS:
+            for smm, mst, ef in ((s, m, e) for s in smms for m in msts for e in efs):
                     set_guc(cur, "hnsw.scan_mem_multiplier", smm)
                     set_guc(cur, "hnsw.max_scan_tuples", mst)
+                    set_guc(cur, "hnsw.ef_search", ef)
                     assert_plan(cur, sel, queries[0], "items_embedding_idx",
-                                f"mst={mst}/smm={smm}")
+                                f"mst={mst}/smm={smm}/ef={ef}")
 
                     for q in queries[:WARMUP]:
                         cur.execute(QUERY, (sel, q, K)).fetchall()
@@ -81,7 +80,7 @@ def main(dsn, out):
                         "max_scan_tuples": mst,
                         "scan_mem_multiplier": smm,
                         "iterative_scan": MODE,
-                        "ef_search": EF,
+                        "ef_search": ef,
                         "recall_mean": round(float(np.mean(recalls)), 4),
                         "rows_returned_mean": round(float(np.mean(counts)), 2),
                         "p50_ms": round(float(np.percentile(lats, 50)), 2),
@@ -89,7 +88,7 @@ def main(dsn, out):
                         "n_queries": len(queries),
                     }
                     rows.append(r)
-                    print(f"  mst={mst:<9d} smm={smm}  recall={r['recall_mean']:.3f} "
+                    print(f"  mst={mst:<9d} smm={smm} ef={ef:<5d} recall={r['recall_mean']:.3f} "
                           f"rows={r['rows_returned_mean']:5.2f} "
                           f"p50={r['p50_ms']:7.2f}ms p95={r['p95_ms']:8.2f}ms")
 
@@ -104,5 +103,10 @@ if __name__ == "__main__":
     p = argparse.ArgumentParser()
     p.add_argument("--dsn", default="postgresql://postgres:pw@127.0.0.1:5433/vectorlab")
     p.add_argument("--out", default="results_mst.csv")
+    ints = lambda s: [int(x) for x in s.split(",")]
+    p.add_argument("--sel", type=ints, default=SELECTIVITIES)
+    p.add_argument("--mst", type=ints, default=MSTS)
+    p.add_argument("--smm", type=ints, default=SMMS)
+    p.add_argument("--ef", type=ints, default=EFS)
     a = p.parse_args()
-    main(a.dsn, a.out)
+    main(a.dsn, a.out, a.sel, a.mst, a.smm, a.ef)
