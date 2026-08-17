@@ -56,6 +56,32 @@ ground-truth pipeline to disagree with.
 The filter column is `bucket`, uniform over `0..999`, so `WHERE bucket < N` gives exactly
 `N/1000` selectivity. One column, any selectivity, no reload.
 
+## Results
+
+Run at 100k and 1M SIFT-128 vectors, pgvector 0.8.6 on PostgreSQL 17. Defaults
+(`ef_search=40`, `iterative_scan=off`), asking for `LIMIT 10`:
+
+| selectivity | recall@10 100k | recall@10 1M | rows returned 1M |
+|---|---|---|---|
+| 100% | 0.980 | 0.945 | 10.00 |
+| 10% | 0.398 | 0.406 | 4.06 |
+| 1% | 0.046 | 0.041 | 0.41 |
+| 0.1% | 0.004 | 0.006 | 0.06 |
+
+**The cliff is set by selectivity, not by table size.** Ten times the data moves
+the recall at a given selectivity barely at all. What does change with scale:
+
+- **The mitigation weakens.** `iterative_scan=relaxed_order` fully recovers recall at
+  100k (0.975 at 0.1%) but only reaches 0.848 at 1M, and does not respond to
+  `ef_search` — 0.848 at ef=40, 0.866 at ef=400, both around 100ms.
+- **The planner's accidental rescue disappears.** At 100k and 0.1% selectivity the
+  planner drops HNSW for an exact seq scan, so results are correct by accident. At 1M
+  a seq scan over 1.36GB is no longer cheap, so it stays on HNSW — and the stock
+  configuration returns 0.06 of the 10 rows requested, with no error.
+
+So the small-scale run understates the problem twice over: the fix looks complete when
+it isn't, and the planner covers the worst case when it won't at production size.
+
 ## Dataset
 
 SIFT-128-euclidean from ann-benchmarks. **Do not substitute random vectors.** In 128
@@ -72,7 +98,7 @@ Stated up front, because a benchmark that hides these is not worth reading.
 - **Client-side timing.** Latency includes driver and loopback round-trip. Consistent
   across cells, so comparisons hold; absolute numbers are not server-side timings.
 - **Single node, laptop-class hardware.** Relative behaviour is the finding, not throughput.
-- **100k rows by default.** Recall cliffs move with dataset size — `--rows` scales it up.
+- **100k rows by default.** `--rows` scales it up; results at 1M are in `results_1m.csv`.
 - 10 warmup queries per cell, then one timed run per query. Good enough for p50/p95 across
   200 queries; not a substitute for a sustained load test.
 
