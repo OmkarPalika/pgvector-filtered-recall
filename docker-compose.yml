@@ -1,0 +1,24 @@
+services:
+  db:
+    image: pgvector/pgvector:pg17
+    environment:
+      POSTGRES_PASSWORD: pw
+      POSTGRES_DB: vectorlab
+    ports:
+      # 5433 on the host: a native PostgreSQL install commonly owns 5432, and
+      # connecting to the wrong server shows up as a confusing auth failure.
+      - "5433:5432"
+    # Docker defaults /dev/shm to 64MB. Parallel HNSW builds allocate the graph in
+    # dynamic shared memory, so the build dies with "could not resize shared memory
+    # segment ... No space left on device" unless this exceeds maintenance_work_mem.
+    shm_size: 1gb
+    command: >
+      postgres
+      -c shared_buffers=1GB
+      -c maintenance_work_mem=512MB
+      -c max_parallel_maintenance_workers=4
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+
+volumes:
+  pgdata:
