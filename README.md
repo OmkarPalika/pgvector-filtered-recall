@@ -161,6 +161,48 @@ high-qps user-facing endpoint that has not been capacity-planned for it.
 Caveat: the container ran with no memory limit, so this measures the cost, not the
 point at which a constrained instance would fail.
 
+### A uniform filter attribute describes neither real case
+
+Everything above filters on `bucket`, which is uniform random and independent of vector
+position — the standard way filtered-ANN benchmarks are built. Real filter attributes
+are not independent: one tenant's documents, one category, one date range sit together
+in embedding space. `bucket_corr` models that, ranking rows by distance to a fixed
+anchor so `bucket_corr < N` is a compact ball holding exactly the same N/1000 of the
+table. Mean distance to the anchor is 253 for the correlated subset against 506 for the
+uniform one.
+
+Where the query sits relative to that ball decides the outcome. Both cases, 1M rows,
+`recall@10` and rows returned out of 10 requested:
+
+| layout | query | selectivity | default | recipe |
+|---|---|---|---|---|
+| uniform | near | 0.1% | 0.003 (0.03 rows) | 1.000, 183ms |
+| uniform | far | 0.1% | 0.002 (0.02 rows) | 0.999, 160ms |
+| correlated | near | 0.1% | **0.471** (4.82 rows) | 0.945, 7ms |
+| correlated | near | 1.0% | **0.913** (9.83 rows) | 0.922, 4ms |
+| correlated | far | 0.1% | **0.000** (0 rows) | **0.000, 702ms** |
+| correlated | far | 1.0% | **0.000** (0 rows) | **0.000, 765ms** |
+
+Three things follow, and they cut in opposite directions:
+
+- **Searching inside your own region is far better than a uniform benchmark suggests.**
+  0.471 against 0.003 on stock settings. The filtered rows are where the graph walk
+  already goes, so candidates survive the predicate instead of being discarded.
+- **The fix is much cheaper there too** — 0.471 to 0.945 for 3.7ms to 7.2ms, against
+  183ms to do the same job on uniform data.
+- **Searching outside the region fails completely, and the fix makes it worse.** Zero
+  rows at every setting, and `relaxed_order` spends 700ms+ to return nothing where the
+  default fails in 3.5ms. Confirmed by EXPLAIN: `Rows Removed by Filter: 101373`, the
+  entire `max_scan_tuples` budget spent, no row surviving the predicate.
+
+That last row is a query for something the tenant does not have, which is ordinary. It
+means **the queries that return nothing are the most expensive queries in the system**,
+and combined with ~16MB of scan memory each, a burst of no-match searches is the worst
+load this configuration can be given: peak memory, peak latency, no results.
+
+So a uniform filter attribute is not a conservative simplification. It sits between two
+real behaviours and describes neither.
+
 ## Dataset
 
 SIFT-128-euclidean from ann-benchmarks. **Do not substitute random vectors.** In 128
@@ -171,9 +213,10 @@ of measure), so ANN recall on them is meaningless and does not resemble real emb
 
 Stated up front, because a benchmark that hides these is not worth reading.
 
-- **Synthetic filter attribute.** `bucket` is uniform and independent of vector position.
-  Real filters (tenant, category, date) correlate with the embedding, which changes
-  the shape of the collapse. Correlated-attribute runs are the obvious follow-up.
+- **Two filter attributes, both synthetic.** `bucket` is uniform and independent of
+  vector position; `bucket_corr` is a compact ball around a fixed anchor. Real
+  attributes sit somewhere between a single ball and many scattered clusters, and a
+  multi-cluster attribute is the obvious next one to add.
 - **Client-side timing.** Latency includes driver and loopback round-trip. Consistent
   across cells, so comparisons hold; absolute numbers are not server-side timings.
 - **Single node, laptop-class hardware.** Relative behaviour is the finding, not throughput.

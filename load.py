@@ -53,6 +53,29 @@ def to_literal(vec):
     return "[" + ",".join(f"{x:.6g}" for x in vec) + "]"
 
 
+def correlated_buckets(train):
+    """Bucket by rank of distance to a fixed anchor.
+
+    `bucket_corr < N` then selects the N/1000 rows closest to the anchor — a compact
+    ball in embedding space, which is how real filter attributes behave (one tenant's
+    or one category's documents sit together). `bucket` scatters uniformly instead, so
+    the pair isolates spatial layout while holding selectivity identical.
+
+    Distances are computed in chunks: train - anchor on the full 1M x 128 array would
+    allocate a second 512MB float32 copy, and the squaring another.
+    """
+    anchor = train[0]  # deterministic, so the attribute is stable across runs
+    d = np.empty(len(train), dtype=np.float32)
+    for i in range(0, len(train), 100_000):
+        chunk = train[i:i + 100_000].astype(np.float32) - anchor
+        d[i:i + 100_000] = np.einsum("ij,ij->i", chunk, chunk)
+
+    corr = np.empty(len(train), dtype=np.int32)
+    # Equal-sized buckets by rank, so selectivity stays exactly N/1000.
+    corr[np.argsort(d)] = np.arange(len(train)) * BUCKETS // len(train)
+    return corr
+
+
 def load(dsn, rows):
     with h5py.File(DATA) as f:
         train = f["train"][:rows]
@@ -60,6 +83,7 @@ def load(dsn, rows):
 
     # Seeded so the filter attribute is identical across runs and machines.
     buckets = np.random.default_rng(SEED).integers(0, BUCKETS, size=len(train))
+    corr = correlated_buckets(train)
 
     with psycopg.connect(dsn) as conn:
         with conn.cursor() as cur:
@@ -68,9 +92,10 @@ def load(dsn, rows):
             conn.commit()
 
             t = time.perf_counter()
-            with cur.copy("COPY items (id, bucket, embedding) FROM STDIN") as cp:
+            with cur.copy(
+                    "COPY items (id, bucket, bucket_corr, embedding) FROM STDIN") as cp:
                 for i, v in enumerate(train):
-                    cp.write_row((i, int(buckets[i]), to_literal(v)))
+                    cp.write_row((i, int(buckets[i]), int(corr[i]), to_literal(v)))
             conn.commit()
             print(f"copy: {time.perf_counter() - t:.1f}s")
 

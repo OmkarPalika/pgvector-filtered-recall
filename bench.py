@@ -59,14 +59,14 @@ def set_guc(cur, name, value):
         sys.exit(f"FATAL: {name}={value!r} did not apply — server reports {got!r}")
 
 
-def plan_text(cur, sel, qv):
+def plan_text(cur, sel, qv, query=QUERY):
     return "\n".join(r[0] for r in cur.execute(
-        "EXPLAIN " + QUERY, (sel, qv, K)).fetchall())
+        "EXPLAIN " + query, (sel, qv, K)).fetchall())
 
 
-def assert_plan(cur, sel, qv, must_contain, label):
+def assert_plan(cur, sel, qv, must_contain, label, query=QUERY):
     """Fail loudly if the planner is not running the scan this measurement assumes."""
-    plan = plan_text(cur, sel, qv)
+    plan = plan_text(cur, sel, qv, query)
     if must_contain not in plan:
         sys.exit(f"FATAL: {label} expected {must_contain!r} in plan, got:\n{plan}")
 
