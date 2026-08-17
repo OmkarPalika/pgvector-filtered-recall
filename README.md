@@ -221,6 +221,55 @@ memory, peak latency, no results.
 A uniform filter attribute is therefore not a conservative simplification. It sits
 between real behaviours and describes none of them.
 
+### The fix is a btree on the filter column, not HNSW tuning
+
+None of the above is really a vector-index problem. With no index on the filter column,
+the planner's only alternative to HNSW is a 1M-row seq scan, which it rightly refuses.
+Given a btree it reads the filtered rows directly and sorts them exactly — nothing can
+be missed, so there is no recall question at all. It is also why the 100k run never
+showed the failure: a seq scan was cheap enough there that the planner already escaped.
+
+The same query that returned 0 rows in 633ms through HNSW:
+
+```
+Limit  (actual time=3.683..3.687 rows=10 loops=1)
+  ->  Sort  (Sort Method: top-N heapsort  Memory: 25kB)
+        ->  Bitmap Heap Scan on items  (actual rows=1000)
+              Recheck Cond: (bucket_corr < 1)
+              ->  Bitmap Index Scan on items_bucket_corr_idx  (actual rows=1000)
+Execution Time: 3.722 ms
+```
+
+10 rows, exact, in 3.7ms — measured while the host was saturated, so that is an upper
+bound. With a btree present the planner picks `bitmap+sort` at 0.1% for every layout and
+both query arms, returning recall 1.000 and a full 10 rows. The zero-row failure is gone.
+
+**An existence probe does not work as a predictor**, which is worth recording because it
+is the obvious first idea. `SELECT 1 FROM items WHERE bucket_corr < 1 LIMIT 1` returns a
+row in 0.175ms in exactly the failing case: thousands of rows match the predicate, they
+are simply nowhere near the query.
+
+The crossover sits between 0.1% and 1%. At 1% the planner switches back to HNSW, and the
+failure returns with it:
+
+| layout | arm | selectivity | plan chosen | recall | rows |
+|---|---|---|---|---|---|
+| correlated | far | 0.1% | bitmap+sort | 1.000 | 10 |
+| correlated | far | 1.0% | **hnsw** | **0.000** | **0** |
+| correlated | far | 10% | **hnsw** | **0.000** | **0** |
+
+At 1% the planner prefers HNSW to a bitmap scan of 10,000 rows and gets nothing back.
+**The cost model cannot represent this failure**: it prices HNSW as though the index will
+find matching rows, and correlation between the filter column and vector position means
+it will not. No amount of `ANALYZE` helps, because the statistic that would predict it
+does not exist. So the switch is silent, and it happens at a selectivity where the
+alternative is still cheap.
+
+Practical reading: below roughly 1% selectivity, index the filter column and let the
+planner do an exact scan rather than tuning HNSW at all. Above it, verify with EXPLAIN
+which plan you actually get, because the choice flips without warning and one side of
+that flip can return zero rows.
+
 **Latency caveat.** The three-layout run was executed while the host sat at 100% CPU
 from unrelated work — the same run's HNSW build took 1645s against 488s for an identical
 earlier build. Recall reproduced across both runs (0.462 vs 0.471 for correlated/near at

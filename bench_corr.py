@@ -41,6 +41,33 @@ def query_for(col):
             "ORDER BY embedding <-> %s::vector LIMIT %s")
 
 
+def anchor_sets(f, n_rows):
+    """The training rows each column's clusters are built around.
+
+    Reads only the anchor rows rather than the whole training set. Shared so every
+    script splits the query set the same way; if two benchmarks disagreed on what
+    "near" means their numbers would not be comparable.
+    """
+    from load import anchor_indices
+    return {"bucket_multi": f["train"][anchor_indices(n_rows)],
+            "bucket_corr": f["train"][0:1],
+            "bucket": f["train"][0:1]}
+
+
+def arms_for(col, test, anchors, nq=NQ):
+    """Nearest and furthest test vectors relative to that column's anchors.
+
+    For `bucket` the anchors are meaningless — the attribute is independent of vector
+    position — but using the same split keeps it an honest control rather than a
+    differently-sampled query set.
+    """
+    import numpy as np
+    d = np.min([((test - a) ** 2).sum(1) for a in anchors[col]], axis=0)
+    order = np.argsort(d)
+    return {"near": [to_literal(test[i]) for i in order[:nq]],
+            "far": [to_literal(test[i]) for i in order[-nq:]]}
+
+
 def main(dsn, out):
     import h5py
     import numpy as np
@@ -49,27 +76,9 @@ def main(dsn, out):
     with psycopg.connect(dsn, autocommit=True) as probe:
         n_rows = probe.execute("SELECT count(*) FROM items").fetchone()[0]
 
-    from load import anchor_indices
-
     with h5py.File(DATA) as f:
         test = f["test"][:]
-        # bucket_multi ranks within several clusters, so "near" means near any of them.
-        # Read just the anchor rows rather than the whole training set.
-        anchor_sets = {"bucket_multi": f["train"][anchor_indices(n_rows)],
-                       "bucket_corr": f["train"][0:1],
-                       "bucket": f["train"][0:1]}
-
-    def arms_for(col):
-        """Nearest/furthest test vectors relative to that column's anchors.
-
-        For `bucket` the anchors are meaningless — the attribute is independent of
-        position — but using the same split keeps it an honest control rather than a
-        differently-sampled query set.
-        """
-        d = np.min([((test - a) ** 2).sum(1) for a in anchor_sets[col]], axis=0)
-        order = np.argsort(d)
-        return {"near": [to_literal(test[i]) for i in order[:NQ]],
-                "far": [to_literal(test[i]) for i in order[-NQ:]]}
+        anchors = anchor_sets(f, n_rows)
 
     with psycopg.connect(dsn, autocommit=True) as conn:
         cur = conn.cursor()
@@ -84,7 +93,7 @@ def main(dsn, out):
         rows = []
         for col in COLUMNS:
             q_sql = query_for(col)
-            arms = arms_for(col)
+            arms = arms_for(col, test, anchors)
             for arm in ARMS:
                 queries = arms[arm]
                 for sel in SELECTIVITIES:
