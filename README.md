@@ -82,6 +82,30 @@ the recall at a given selectivity barely at all. What does change with scale:
 So the small-scale run understates the problem twice over: the fix looks complete when
 it isn't, and the planner covers the worst case when it won't at production size.
 
+### The two caps have to be raised together
+
+`sweep_mst.py` varies the two knobs left once `ef_search` stops responding. At 1M rows,
+0.1% selectivity, `relaxed_order`, recall@10:
+
+| | `max_scan_tuples=20000` (default) | `max_scan_tuples>=50000` |
+|---|---|---|
+| `scan_mem_multiplier=1` (default) | 0.859 | 0.868 |
+| `scan_mem_multiplier=2` | 0.859 | **0.973** |
+
+Neither knob does anything on its own. `max_scan_tuples` alone saturates at 0.868 and
+stays there all the way to 1,000,000. `scan_mem_multiplier` alone changes nothing at all.
+
+An iterative scan stops at whichever limit it reaches first. The stock configuration
+stops on the tuple cap, so added memory is never reached; lift only the tuple cap and it
+stops on memory instead, which is why 0.868 holds flat across a 20x range of tuple
+budget. Only raising both lets the scan run to where the recall is.
+
+Tuning them one at a time — the ordinary way to tune anything — makes both look useless.
+Cost of moving both: about 1.7x p50 (101ms to ~170ms) to go from 0.868 to 0.973.
+
+At 1% selectivity every cell is 0.993 and neither cap binds. This interaction only
+appears below roughly 1%.
+
 ## Dataset
 
 SIFT-128-euclidean from ann-benchmarks. **Do not substitute random vectors.** In 128
