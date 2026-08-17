@@ -131,6 +131,36 @@ for filtered search.
 At 1% selectivity every cell is 0.993 and neither cap binds. All of this appears only
 below roughly 1%.
 
+### What the recipe costs under concurrency
+
+`scan_mem_multiplier` scales the memory budget of *each* iterative scan, so the cost is
+paid per in-flight query. `bench_conc.py` measures it with the container's cgroup v2
+`anon` counter — not `memory.current`, which includes page cache and shared_buffers and
+would report growth that is not backend memory.
+
+Private backend memory above idle, 0.1% selectivity, `max_scan_tuples=100000`:
+
+| `scan_mem_multiplier` | conc=1 | conc=8 | conc=32 | per connection |
+|---|---|---|---|---|
+| 1 | 5.8MB | 46.1MB | 179.5MB | ~5.7MB |
+| 2 | 9.8MB | 78.2MB | 302.9MB | ~9.6MB |
+| 4 | 15.4MB | 128.9MB | 532.9MB | **~16.4MB** |
+
+Linear in both axes — no superlinearity and no errors, which makes it budgetable:
+**allow roughly 16MB per concurrent filtered query at `smm=4`.** A 100-connection pool
+wants ~1.6GB of headroom beyond `shared_buffers` for scan memory alone.
+
+Throughput pays too. At 32 concurrent clients, going from `smm=1` to `smm=4` drops
+throughput from 124 to 48 qps and raises p95 from 367ms to 1004ms. The single-client
+figure of 2.2x latency understates it; under load it is about 2.6x throughput as well.
+
+So the recipe is conditional, not universal. 0.998 recall for ~3x memory and ~2.6x
+throughput is an easy trade for a low-qps internal search and a poor one for a
+high-qps user-facing endpoint that has not been capacity-planned for it.
+
+Caveat: the container ran with no memory limit, so this measures the cost, not the
+point at which a constrained instance would fail.
+
 ## Dataset
 
 SIFT-128-euclidean from ann-benchmarks. **Do not substitute random vectors.** In 128
