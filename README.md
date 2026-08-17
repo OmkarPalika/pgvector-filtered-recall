@@ -265,10 +265,45 @@ it will not. No amount of `ANALYZE` helps, because the statistic that would pred
 does not exist. So the switch is silent, and it happens at a selectivity where the
 alternative is still cheap.
 
-Practical reading: below roughly 1% selectivity, index the filter column and let the
-planner do an exact scan rather than tuning HNSW at all. Above it, verify with EXPLAIN
-which plan you actually get, because the choice flips without warning and one side of
-that flip can return zero rows.
+### Where exactly the plan flips, and what moves it
+
+Stepping selectivity in 0.1% increments puts the switch between 0.1% and 0.2% for all
+three layouts, and the failure appears on precisely the same step:
+
+| layout | 0.1% (1000 rows) | 0.2% (2000 rows) |
+|---|---|---|
+| uniform | bitmap+sort, 10 rows | hnsw, 10 rows |
+| multicluster | bitmap+sort, 10 rows | hnsw, 9.9 rows |
+| correlated | bitmap+sort, 10 rows | **hnsw, 0 rows** |
+
+`correlated`/far returns a full 10 rows on the exact plan and nothing at all one step
+later, then nothing for every larger selectivity tested. The switch and the failure are
+the same event.
+
+That threshold is **not** a fixed row count, and not a percentage of the table either.
+Bisecting the same decision on `id`, which is physically ordered, puts it at 9,669 rows
+— five to ten times higher than the ~1,000–2,000 seen on the bucket columns:
+
+| filter column | `pg_stats.correlation` | exact plan wins up to |
+|---|---|---|
+| `id` | 1.00 | ~9,670 rows |
+| `bucket_corr` | 0.10 | ~1,000–2,000 rows |
+| `bucket_multi` | -0.01 | ~1,000–2,000 rows |
+| `bucket` | -0.00 | ~1,000–2,000 rows |
+
+What sets it is heap pages touched, not rows. 9,669 sequential ids occupy a short run of
+contiguous pages; 1,000 scattered rows touch about 970, nearly a page each, and the
+bitmap heap scan is priced accordingly.
+
+That gives a lever the pgvector documentation does not mention: **`CLUSTER` the table on
+the filter column and the exact plan — the one that cannot silently return zero rows —
+stays viable across roughly ten times the selectivity range.**
+
+Practical reading: below roughly 1,000–2,000 matching rows, index the filter column and
+let the planner run an exact scan instead of tuning HNSW at all. Physically clustering
+that column extends the range about tenfold. Above it, check EXPLAIN for the plan you
+actually get, because the choice flips without warning and one side of the flip can
+return nothing.
 
 **Latency caveat.** The three-layout run was executed while the host sat at 100% CPU
 from unrelated work — the same run's HNSW build took 1645s against 488s for an identical
