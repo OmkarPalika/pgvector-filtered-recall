@@ -295,13 +295,43 @@ What sets it is heap pages touched, not rows. 9,669 sequential ids occupy a shor
 contiguous pages; 1,000 scattered rows touch about 970, nearly a page each, and the
 bitmap heap scan is priced accordingly.
 
-That gives a lever the pgvector documentation does not mention: **`CLUSTER` the table on
-the filter column and the exact plan — the one that cannot silently return zero rows —
-stays viable across roughly ten times the selectivity range.**
+### CLUSTER on the filter column widens the safe band ~8x
+
+That mechanism predicts a lever the pgvector documentation does not mention, so it was
+tested directly rather than left as inference. `CLUSTER items USING items_bucket_corr_idx`
+physically orders the heap by the filter column. Correlations before and after:
+
+| column | before | after |
+|---|---|---|
+| `bucket_corr` | 0.10 | **1.00** |
+| `id` | 1.00 | **0.07** |
+| `bucket` | -0.00 | 0.00 |
+| `bucket_multi` | -0.01 | -0.07 |
+
+The two columns swap physical ordering, and their thresholds swap with them:
+
+| filter column | exact plan wins up to (before) | (after) |
+|---|---|---|
+| `bucket_corr` | ~1,000–2,000 rows | **8,000–9,000 rows** |
+| `id` | 9,669 rows | **1,522 rows** |
+| `bucket`, `bucket_multi` (controls) | ~1,000–2,000 rows | unchanged |
+
+Nothing changed but physical row order. `bucket_corr` gains about 8x, `id` loses about
+6x, and the two untouched columns do not move.
+
+The zero-row failure moves in lockstep with the plan. Clustered, `correlated`/far returns
+a full 10 rows from 0.1% through 0.8% and nothing at all from 0.9% on — the boundary that
+previously sat at 0.2%. So clustering does not merely shift a cost decision, it widens
+the band in which the query is structurally incapable of silently returning nothing.
+
+Two costs belong with that advice. The CLUSTER took **19m48s** on 1M rows under an
+ACCESS EXCLUSIVE lock, so the table is unavailable for the duration. And PostgreSQL does
+not maintain clustering: it decays as rows are inserted and updated, making this periodic
+maintenance rather than a one-time fix.
 
 Practical reading: below roughly 1,000–2,000 matching rows, index the filter column and
 let the planner run an exact scan instead of tuning HNSW at all. Physically clustering
-that column extends the range about tenfold. Above it, check EXPLAIN for the plan you
+that column extends the range about eightfold. Above it, check EXPLAIN for the plan you
 actually get, because the choice flips without warning and one side of the flip can
 return nothing.
 

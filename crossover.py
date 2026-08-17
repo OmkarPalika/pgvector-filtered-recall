@@ -19,11 +19,11 @@ from bench import DATA, K
 from bench_corr import COLUMNS, LAYOUTS, anchor_sets, arms_for, query_for
 from bench_btree import RECIPE, plan_label
 
-SELS = list(range(1, 11))  # 0.1% .. 1.0%
-NQ = 10                    # only used to confirm the failure, not to time anything
+MAX_SEL = 10  # 0.1% .. 1.0% in 0.1% steps
+NQ = 10       # only used to confirm the failure, not to time anything
 
 
-def main(dsn, out):
+def main(dsn, out, max_sel):
     import h5py
     import numpy as np
     import psycopg
@@ -43,7 +43,7 @@ def main(dsn, out):
         for col in COLUMNS:
             q_sql = query_for(col)
             far = arms_for(col, test, anchors, NQ)["far"]
-            for sel in SELS:
+            for sel in range(1, max_sel + 1):
                 plan = "\n".join(r[0] for r in cur.execute(
                     "EXPLAIN " + q_sql, (sel, far[0], K)).fetchall())
                 chosen = plan_label(plan)
@@ -78,5 +78,8 @@ if __name__ == "__main__":
     p = argparse.ArgumentParser()
     p.add_argument("--dsn", default="postgresql://postgres:pw@127.0.0.1:5433/vectorlab")
     p.add_argument("--out", default="results_crossover.csv")
+    # Raise past 10 when the filter column is physically clustered: the exact plan then
+    # stays cheapest well beyond 1% and the flip falls outside the default range.
+    p.add_argument("--max-sel", type=int, default=MAX_SEL)
     a = p.parse_args()
-    main(a.dsn, a.out)
+    main(a.dsn, a.out, a.max_sel)
