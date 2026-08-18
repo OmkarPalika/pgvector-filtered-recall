@@ -396,11 +396,29 @@ Plan choice is fully deterministic, which is what the crossover claims rest on. 
 moves in the third decimal. Latency moves by multiples and carries no claim in this
 README that a within-run comparison does not already carry.
 
-One caveat on `results_btree.csv` specifically: `planner_free` is measured before
-`hnsw_recipe` on each cell with only 5 warmup queries, so when both pick the same plan
-the first one absorbs the cold cache and reads slower — 143.69ms against 26.90ms on
-uniform/near/1%, identical plan, identical recall. Read that file for its `plan` and
-`recall` columns, not for a latency comparison between its two configurations.
+That re-measurement also exposed a bug in the harness rather than in Postgres. Every
+sweep here measures several configurations back to back over the same cell, and each
+used a truncated warmup — 5 or 10 queries out of 50 to 200. The first configuration in
+the loop therefore absorbed the cold cache and read slower for that reason alone, which
+lands in the results looking like an effect of the setting. On uniform/near/1% the two
+configurations chose the identical plan and scored the identical recall, and were
+recorded 5.3x apart.
+
+The fix is to warm with exactly the queries about to be timed (`warm_cache` in
+`bench.py`), so no configuration is privileged by position. A merely larger fixed
+warmup shrinks the bias without removing it. Across the twelve cells where both
+configurations pick the same plan — where the ratio must be 1.00, since it is the same
+query with the same settings — the worst deviation went from **4.37 to 0.12**, and the
+median ratio from 1.09 to 0.99.
+
+Re-running the whole grid after the fix, on the same index build, reproduced 36/36
+plans and every recall to **0.0000**. So recall does not drift run to run at all; it
+moves only when the graph is rebuilt, and then by less than 0.03. The 0.022 above is a
+cross-build number, not a noise floor.
+
+`bench_builds.py` keeps a deliberately partial warmup. Its second pass exists to
+measure the residual rather than remove it, which is what produced the `within_spread`
+column above.
 
 The comparisons that matter are all within-run anyway. From one idle-host run,
 `correlated`/far:

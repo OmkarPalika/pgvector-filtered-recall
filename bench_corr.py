@@ -19,7 +19,7 @@ import csv
 import sys
 import time
 
-from bench import DATA, K, assert_plan, recall, set_guc, to_literal
+from bench import DATA, K, assert_plan, recall, set_guc, to_literal, warm_cache
 
 COLUMNS = ["bucket", "bucket_corr", "bucket_multi"]
 LAYOUTS = {"bucket": "uniform", "bucket_corr": "correlated",
@@ -115,8 +115,7 @@ def main(dsn, out):
                         assert_plan(cur, sel, queries[0], "items_embedding_idx",
                                     f"{col}/{arm}/{pct}%/{cfg_name}", q_sql)
 
-                        for q in queries[:5]:
-                            cur.execute(q_sql, (sel, q, K)).fetchall()
+                        warm_cache(cur, q_sql, sel, queries)
 
                         recalls, lats, counts = [], [], []
                         for q, truth in zip(queries, truths):

@@ -21,7 +21,6 @@ SMMS = [1, 2]
 EFS = [40]  # flat while a cap binds; becomes worth sweeping once both are lifted
 MODE = "relaxed_order"
 NQ = 100
-WARMUP = 5
 
 
 def main(dsn, out, sels, msts, smms, efs):
@@ -63,8 +62,7 @@ def main(dsn, out, sels, msts, smms, efs):
                     assert_plan(cur, sel, queries[0], "items_embedding_idx",
                                 f"mst={mst}/smm={smm}/ef={ef}")
 
-                    for q in queries[:WARMUP]:
-                        cur.execute(QUERY, (sel, q, K)).fetchall()
+                    warm_cache(cur, QUERY, sel, queries)
 
                     recalls, lats, counts = [], [], []
                     for q, truth in zip(queries, truths):

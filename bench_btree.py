@@ -28,7 +28,7 @@ import argparse
 import csv
 import time
 
-from bench import DATA, K, recall, set_guc, to_literal
+from bench import DATA, K, recall, set_guc, to_literal, warm_cache
 from bench_corr import COLUMNS, LAYOUTS, anchor_sets, arms_for, query_for
 
 ARMS = ["near", "far"]
@@ -102,8 +102,7 @@ def main(dsn, out):
                             "EXPLAIN " + q_sql, (sel, queries[0], K)).fetchall())
                         chosen = plan_label(plan)
 
-                        for q in queries[:5]:
-                            cur.execute(q_sql, (sel, q, K)).fetchall()
+                        warm_cache(cur, q_sql, sel, queries)
 
                         recalls, lats, counts = [], [], []
                         for q, truth in zip(queries, truths):

@@ -24,7 +24,6 @@ MODES = ["off", "relaxed_order", "strict_order"]
 EFS = [40, 100, 400]
 K = 10
 NQ = 200
-WARMUP = 10
 
 QUERY = "SELECT id FROM items WHERE bucket < %s ORDER BY embedding <-> %s::vector LIMIT %s"
 
@@ -57,6 +56,22 @@ def set_guc(cur, name, value):
     got = cur.execute(f"SHOW {name}").fetchone()[0]
     if str(got) != str(value):
         sys.exit(f"FATAL: {name}={value!r} did not apply — server reports {got!r}")
+
+
+def warm_cache(cur, query, sel, queries, k=K):
+    """Run the whole query set once and throw it away.
+
+    Every sweep here measures several configurations back to back over the same cell.
+    A truncated warmup leaves the first configuration in that loop absorbing the cold
+    cache, so it reads slower for that reason alone and the ordering shows up in the
+    results as if it were an effect of the setting — 143.69ms against 26.90ms between
+    two bench_btree.py configurations that chose the identical plan and scored the
+    identical recall. Warming with exactly the queries about to be timed is what makes
+    the order stop mattering; a merely larger fixed warmup shrinks the bias without
+    removing it.
+    """
+    for q in queries:
+        cur.execute(query, (sel, q, k)).fetchall()
 
 
 def plan_text(cur, sel, qv, query=QUERY):
@@ -132,8 +147,7 @@ def main(dsn, out):
                     assert_plan(cur, sel, queries[0],
                                 "items_embedding_idx", f"{mode}/ef={ef}")
 
-                    for q in queries[:WARMUP]:
-                        cur.execute(QUERY, (sel, q, K)).fetchall()
+                    warm_cache(cur, QUERY, sel, queries)
 
                     recalls, lats, counts = [], [], []
                     for q, truth in zip(queries, truths):
