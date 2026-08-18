@@ -486,3 +486,11 @@ exceed `maintenance_work_mem`.
 
 pgvector **0.8.0 or newer** — `hnsw.iterative_scan` does not exist before that.
 `bench.py` checks and exits with a clear message.
+
+## Who wrote this
+
+Built by Omkar Palika. I take focused engagements on vector search in Postgres —
+recall audits, filter-plan review, index and layout tuning.
+
+If your filtered vector queries are returning the wrong rows and you cannot work out
+why, open an issue on this repo or email palikaomkar@gmail.com.
