@@ -256,9 +256,11 @@ failure returns with it:
 |---|---|---|---|---|---|
 | correlated | far | 0.1% | bitmap+sort | 1.000 | 10 |
 | correlated | far | 1.0% | **hnsw** | **0.000** | **0** |
-| correlated | far | 10% | **hnsw** | **0.000** | **0** |
+| correlated | far | 10% | **hnsw** | **0.002** | **0.02** |
 
 At 1% the planner prefers HNSW to a bitmap scan of 10,000 rows and gets nothing back.
+(The 0.002 at 10% is one query in 50 returning one row, on a re-measurement against a
+different graph; the first run scored a clean 0.000. Either way the plan is useless.)
 **The cost model cannot represent this failure**: it prices HNSW as though the index will
 find matching rows, and correlation between the filter column and vector position means
 it will not. No amount of `ANALYZE` helps, because the statistic that would predict it
@@ -377,8 +379,28 @@ those three were isolated from each other.
 **Compare latencies within a run.** Still the right rule, but for a weaker reason than the
 one given before: not because a rebuilt graph is unreliable, but because whatever moves
 cross-run timings has not been pinned down. Recall carries the load-bearing claims in this
-README precisely because it reproduces on both axes — ±0.007 across builds here, ±0.01
-across runs.
+README precisely because it reproduces on both axes — ±0.007 across the five builds
+here, and ±0.022 worst-case over the full 36-cell btree grid re-measured months of
+cache state and one index build apart.
+
+That 36-cell re-measurement is the wider check on all of this, and it is blunt about
+which columns are trustworthy:
+
+| | reproduced |
+|---|---|
+| plan chosen | **36/36 identical** |
+| recall | 22/36 moved, worst by 0.022 (uniform/near/10%: 0.950 to 0.928) |
+| p50 | 0.5x to 5.4x |
+
+Plan choice is fully deterministic, which is what the crossover claims rest on. Recall
+moves in the third decimal. Latency moves by multiples and carries no claim in this
+README that a within-run comparison does not already carry.
+
+One caveat on `results_btree.csv` specifically: `planner_free` is measured before
+`hnsw_recipe` on each cell with only 5 warmup queries, so when both pick the same plan
+the first one absorbs the cold cache and reads slower — 143.69ms against 26.90ms on
+uniform/near/1%, identical plan, identical recall. Read that file for its `plan` and
+`recall` columns, not for a latency comparison between its two configurations.
 
 The comparisons that matter are all within-run anyway. From one idle-host run,
 `correlated`/far:
@@ -393,8 +415,12 @@ run at every magnitude.
 
 One anomaly worth recording rather than hiding: `multicluster`/far at 0.1% scores 0.998
 on `bitmap+sort`, and an exact plan cannot miss rows. It is one query in 50 losing a
-single row to a distance tie broken differently between the two plans. Harmless, but an
-"exact" plan scoring under 1.0 should be explained, not glossed over.
+single row to a distance tie broken differently between the two plans — ground truth
+sorts under `Seq Scan`, the measurement under `Bitmap Heap Scan`, and `Sort` does not
+promise a stable order across plan shapes. Re-measuring the same cell against a
+different index build scored a clean 1.000, which is what a tie-break explanation
+predicts and a real miss would not. Harmless, but an "exact" plan scoring under 1.0
+should be explained, not glossed over.
 
 ## Dataset
 

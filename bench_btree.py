@@ -17,7 +17,12 @@ Two results here are independent of machine load, which matters because this was
 while the host was saturated:
   * which plan the planner chooses, decided by the cost model rather than the clock
   * whether the query still returns zero rows
-Latency is recorded but should be re-read on an idle host before it is quoted.
+Latency is recorded but should not be compared *between* the two configurations. They
+run in a fixed order on each cell with only 5 warmup queries, so whenever both pick the
+same plan the first one absorbs the cold cache and reads slower for that reason alone —
+143.69ms against 26.90ms on uniform/near/1%, same plan and same recall. Re-running the
+whole file on a warm cache reproduced 36/36 plans and every recall to within 0.022,
+while p50 moved by up to 5.4x.
 """
 import argparse
 import csv
