@@ -335,26 +335,50 @@ that column extends the range about eightfold. Above it, check EXPLAIN for the p
 actually get, because the choice flips without warning and one side of the flip can
 return nothing.
 
-### Latency does not reproduce across index builds. Recall does.
+### Latency reproduces across index builds, to within 6%
 
-All of the above was re-run on an idle host (0–2% CPU, HNSW build 518s against 1645s for
-the same build under load) to replace timings taken while the machine was busy. Recall
-reproduced tightly — 0.463 against 0.462 and 0.471 for correlated/near at 0.1%, 0.224
-against 0.223 for multicluster/near. Latency did not:
+An earlier version of this section claimed the opposite: that a fresh HNSW graph moves
+latency by roughly 2x while recall stays put. That was wrong. `bench_builds.py` is what
+disproved it.
 
-| cell | run 1 | run 2 (busy host) | run 3 (idle host) |
-|---|---|---|---|
-| uniform near 0.1% recipe | 183ms | 191ms | 328ms |
-| correlated far 0.1% recipe | 702ms | 2790ms | 1568ms |
+It rebuilds only the index, five times, over an untouched table, and re-measures the same
+five cells on each build. Ground truth is computed once before the loop, so every build is
+scored against identical answers. Each build is measured twice, separated by a full sweep
+of the other cells — builds run one after another, so anything drifting with wall-clock
+time (host load, thermals, cache state) lands on whichever build was running and is
+otherwise indistinguishable from the build itself. That second pass is the control.
 
-The idle host is *slower* than the busy one in places, so contention is not the
-explanation. Each reload builds a fresh HNSW graph with 4 parallel workers and the
-resulting graph differs every time. Recall is insensitive to that, latency is not.
+p50 per build, median of the two passes:
 
-**So compare latencies within a run, not across runs.** Every timing quoted in this
-README comes from a single run and is reproducible to roughly a factor of two, while
-recall is reproducible to ±0.01. Pinning latency down further would need repeated builds
-per configuration, which this repo does not do.
+| cell | b1 | b2 | b3 | b4 | b5 | all | b2-5 |
+|---|---|---|---|---|---|---|---|
+| uniform near 0.1% recipe | 189.20 | 173.67 | 176.23 | 175.93 | 173.85 | 1.09x | **1.01x** |
+| correlated far 1.0% recipe | 835.03 | 694.57 | 700.90 | 696.36 | 705.40 | 1.20x | **1.02x** |
+| multicluster far 1.0% recipe | 447.00 | 382.39 | 389.03 | 370.88 | 390.44 | 1.21x | **1.05x** |
+| correlated near 0.1% recipe | 8.07 | 7.06 | 6.71 | 6.69 | 6.65 | 1.21x | **1.06x** |
+| multicluster near 0.1% default | 4.54 | 3.56 | 3.47 | 3.62 | 3.41 | 1.33x | **1.06x** |
+
+Build 1 is the slowest in all five cells, and its own build took 605s against 462-529s for
+the rest — a cold-start cost paid once per process, not a property of its graph. The four
+builds after it agree to within 6%, and to within 2% on the two slowest cells. The
+within-build control says the same thing from the other side: repeating a cell on the
+*same* graph moved it by up to 1.26x, which is more than rebuilding the graph did.
+
+The graphs genuinely do differ. Recall lands on 0.947/0.951/0.952/0.954 across builds for
+multicluster/far and 0.944/0.945/0.946/0.948 for correlated/near — impossible if the
+parallel build were deterministic. The difference is just far too small to move latency by
+anything like 2x.
+
+So the 2x seen across the three full runs above is **not** build nondeterminism, and it is
+not host contention either (the idle host was slower). It has not been identified. It
+tracks whole-run boundaries — separate process, full reload, hours apart — and none of
+those three were isolated from each other.
+
+**Compare latencies within a run.** Still the right rule, but for a weaker reason than the
+one given before: not because a rebuilt graph is unreliable, but because whatever moves
+cross-run timings has not been pinned down. Recall carries the load-bearing claims in this
+README precisely because it reproduces on both axes — ±0.007 across builds here, ±0.01
+across runs.
 
 The comparisons that matter are all within-run anyway. From one idle-host run,
 `correlated`/far:

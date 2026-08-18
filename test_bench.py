@@ -24,7 +24,39 @@ def main():
 
     check_correlated_buckets()
     check_multicluster_buckets()
+    check_build_summary()
     print("ok")
+
+
+def check_build_summary():
+    """The whole point of the repeated-build run is the spread, so a wrong reduction
+    here would fabricate the conclusion it is meant to test."""
+    from bench_builds import summarize
+
+    def row(cell, build, p, ms, rec=1.0):
+        return {"cell": cell, "build": build, "pass": p,
+                "p50_ms": ms, "recall_mean": rec}
+
+    # Cell "a": three builds, each measured twice. Per-build medians are 110, 220, 150,
+    # so across_spread is 2.0 while no single build disagreed with itself by more than
+    # 1.1x. That gap is the finding the run is built to produce.
+    rows = [row("a", 1, 1, 100.0, 0.90), row("a", 1, 2, 120.0, 0.90),
+            row("a", 2, 1, 210.0, 0.91), row("a", 2, 2, 230.0, 0.91),
+            row("a", 3, 1, 150.0, 0.90), row("a", 3, 2, 150.0, 0.90),
+            row("b", 1, 1, 10.0), row("b", 1, 2, 20.0)]
+    a, b = summarize(rows)
+
+    assert a["builds"] == 3 and a["passes_per_build"] == 2
+    assert (a["p50_min_ms"], a["p50_median_ms"], a["p50_max_ms"]) == (110.0, 150.0, 220.0)
+    assert a["across_spread"] == 2.0, "must compare per-build medians, not raw passes"
+    assert a["within_spread_max"] == 1.2
+    assert a["recall_spread"] == 0.01
+
+    # Cell "b": one build, both passes. Nothing to say about builds — across_spread has
+    # to be neutral while within_spread still reports the 2x the host produced, or the
+    # summary would credit the build for host noise.
+    assert b["builds"] == 1 and b["across_spread"] == 1.0
+    assert b["within_spread_max"] == 2.0
 
 
 def check_multicluster_buckets():
