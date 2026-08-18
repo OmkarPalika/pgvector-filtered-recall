@@ -181,16 +181,16 @@ What decides the outcome is where the query sits relative to that region. `recal
 | layout | query | selectivity | default | recipe |
 |---|---|---|---|---|
 | uniform | near | 0.1% | 0.003 (0.03) | 1.000 |
-| multicluster | near | 0.1% | 0.223 (2.24) | 0.996 |
-| correlated | near | 0.1% | **0.462** (4.72) | 0.946 |
-| uniform | near | 1.0% | 0.051 (0.51) | 0.995 |
-| multicluster | near | 1.0% | 0.771 (7.85) | 0.980 |
-| correlated | near | 1.0% | **0.913** (9.84) | 0.922 |
-| uniform | far | 0.1% | 0.002 (0.02) | 0.999 |
-| multicluster | far | 0.1% | **0.000** (0) | 0.685 (9.28) |
+| multicluster | near | 0.1% | 0.228 (2.29) | 0.997 |
+| correlated | near | 0.1% | **0.468** (4.76) | 0.948 |
+| uniform | near | 1.0% | 0.049 (0.49) | 0.990 |
+| multicluster | near | 1.0% | 0.774 (7.89) | 0.981 |
+| correlated | near | 1.0% | **0.916** (9.81) | 0.928 |
+| uniform | far | 0.1% | 0.002 (0.02) | 1.000 |
+| multicluster | far | 0.1% | **0.000** (0) | 0.659 (9.11) |
 | correlated | far | 0.1% | **0.000** (0) | **0.000** (0) |
-| uniform | far | 1.0% | 0.028 (0.28) | 0.999 |
-| multicluster | far | 1.0% | **0.000** (0) | 0.959 |
+| uniform | far | 1.0% | 0.029 (0.29) | 0.998 |
+| multicluster | far | 1.0% | **0.000** (0) | 0.952 |
 | correlated | far | 1.0% | **0.000** (0) | **0.000** (0) |
 
 Reading down the near rows: the more the filter attribute clusters, the better stock
@@ -209,7 +209,7 @@ failure. Confirmed directly by EXPLAIN on a single far query:
 `Rows Removed by Filter: 101373` — the whole `max_scan_tuples` budget spent, not one row
 surviving the predicate, 0 returned in 633ms against an exact scan's 10.
 
-The recipe rescues this only when the region is scattered: 0.959 and 0.685 for eight
+The recipe rescues this only when the region is scattered: 0.952 and 0.659 for eight
 clusters, still 0.000 for one distant ball. Some cluster is always reachable within the
 scan budget when there are eight; when there is one and it is far, none is.
 
