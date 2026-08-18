@@ -13,7 +13,7 @@ import csv
 import sys
 import time
 
-from bench import DATA, K, QUERY, assert_plan, recall, set_guc, to_literal
+from bench import DATA, K, QUERY, assert_plan, recall, set_guc, to_literal, warm_cache
 
 SELECTIVITIES = [10, 1]  # 1% and 0.1% — where iterative_scan stops being enough
 MSTS = [20_000, 50_000, 100_000, 200_000, 500_000, 1_000_000]

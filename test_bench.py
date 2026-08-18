@@ -25,7 +25,49 @@ def main():
     check_correlated_buckets()
     check_multicluster_buckets()
     check_build_summary()
+    check_no_undefined_globals()
     print("ok")
+
+
+MODULES = ["bench", "bench_corr", "bench_btree", "bench_builds", "bench_conc", "sweep_mst",
+           "crossover", "load"]
+
+
+def check_no_undefined_globals():
+    """Catch a call to a name that was never imported.
+
+    py_compile accepts one happily, so the failure surfaces only when that line runs.
+    Removing WARMUP from sweep_mst.py and calling warm_cache without adding it to the
+    import cost a 45-minute sweep and left the database with its btree indexes dropped.
+
+    Every LOAD_GLOBAL a function performs is visible in its bytecode, so checking those
+    names against the module and builtins costs nothing and covers all of these scripts.
+    Imports inside main() are locals and never appear here, which is why the benchmarks
+    can keep deferring numpy and h5py.
+    """
+    import builtins
+    import dis
+    import importlib
+    import types
+
+    def codes(code):
+        yield code
+        for c in code.co_consts:
+            if isinstance(c, types.CodeType):
+                yield from codes(c)
+
+    bad = []
+    for name in MODULES:
+        mod = importlib.import_module(name)
+        known = set(vars(mod)) | set(dir(builtins))
+        for obj in vars(mod).values():
+            if not isinstance(obj, types.FunctionType) or obj.__module__ != name:
+                continue
+            for code in codes(obj.__code__):
+                for ins in dis.get_instructions(code):
+                    if ins.opname == "LOAD_GLOBAL" and ins.argval not in known:
+                        bad.append(f"{name}.{code.co_name}: {ins.argval}")
+    assert not bad, "undefined global(s): " + ", ".join(sorted(set(bad)))
 
 
 def check_build_summary():

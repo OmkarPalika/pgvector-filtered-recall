@@ -63,21 +63,21 @@ Run at 100k and 1M SIFT-128 vectors, pgvector 0.8.6 on PostgreSQL 17. Defaults
 
 | selectivity | recall@10 100k | recall@10 1M | rows returned 1M |
 |---|---|---|---|
-| 100% | 0.980 | 0.945 | 10.00 |
-| 10% | 0.398 | 0.406 | 4.06 |
+| 100% | 0.979 | 0.942 | 10.00 |
+| 10% | 0.398 | 0.401 | 4.01 |
 | 1% | 0.046 | 0.041 | 0.41 |
-| 0.1% | 0.004 | 0.006 | 0.06 |
+| 0.1% | 0.004 | 0.005 | 0.05 |
 
 **The cliff is set by selectivity, not by table size.** Ten times the data moves
 the recall at a given selectivity barely at all. What does change with scale:
 
 - **The mitigation weakens.** `iterative_scan=relaxed_order` fully recovers recall at
-  100k (0.975 at 0.1%) but only reaches 0.848 at 1M, and does not respond to
-  `ef_search` — 0.848 at ef=40, 0.866 at ef=400, both around 100ms.
+  100k (0.975 at 0.1%) but only reaches 0.847 at 1M, and does not respond to
+  `ef_search` — 0.847 at ef=40, 0.865 at ef=400, 99ms and 106ms.
 - **The planner's accidental rescue disappears.** At 100k and 0.1% selectivity the
   planner drops HNSW for an exact seq scan, so results are correct by accident. At 1M
   a seq scan over 1.36GB is no longer cheap, so it stays on HNSW — and the stock
-  configuration returns 0.06 of the 10 rows requested, with no error.
+  configuration returns 0.05 of the 10 rows requested, with no error.
 
 So the small-scale run understates the problem twice over: the fix looks complete when
 it isn't, and the planner covers the worst case when it won't at production size.
@@ -119,12 +119,12 @@ The three settings do different jobs, and only one of them is a tuning dial:
 
 - **`max_scan_tuples` is a gate.** Below the binding point nothing else can take effect;
   above it, further increases do nothing whatsoever.
-- **`scan_mem_multiplier` is the dial.** 1 → 2 → 4 gives 0.868 → 0.973 → 0.998 at
-  98 → 161 → 217ms — a clean recall-for-latency trade.
+- **`scan_mem_multiplier` is the dial.** 1 → 2 → 4 gives 0.861 → 0.970 → 0.996 at
+  107 → 196 → 237ms — a clean recall-for-latency trade.
 - **`ef_search` is inert under a selective filter.** Not weak, inert. It is also the
   setting almost every tuning guide reaches for first.
 
-The ceiling is not structural. 0.998 recall at 0.1% selectivity on 1M rows is reachable
+The ceiling is not structural. 0.996 recall at 0.1% selectivity on 1M rows is reachable
 for about 2.2x the default latency. The default configuration is simply the wrong one
 for filtered search.
 
@@ -142,19 +142,19 @@ Private backend memory above idle, 0.1% selectivity, `max_scan_tuples=100000`:
 
 | `scan_mem_multiplier` | conc=1 | conc=8 | conc=32 | per connection |
 |---|---|---|---|---|
-| 1 | 5.8MB | 46.1MB | 179.5MB | ~5.7MB |
-| 2 | 9.8MB | 78.2MB | 302.9MB | ~9.6MB |
-| 4 | 15.4MB | 128.9MB | 532.9MB | **~16.4MB** |
+| 1 | 5.8MB | 46.0MB | 181.2MB | ~5.7MB |
+| 2 | 9.8MB | 78.1MB | 291.0MB | ~9.1MB |
+| 4 | 12.8MB | 116.1MB | 400.7MB | **~12.5MB** |
 
 Linear in both axes — no superlinearity and no errors, which makes it budgetable:
-**allow roughly 16MB per concurrent filtered query at `smm=4`.** A 100-connection pool
-wants ~1.6GB of headroom beyond `shared_buffers` for scan memory alone.
+**allow roughly 13MB per concurrent filtered query at `smm=4`.** A 100-connection pool
+wants ~1.3GB of headroom beyond `shared_buffers` for scan memory alone.
 
 Throughput pays too. At 32 concurrent clients, going from `smm=1` to `smm=4` drops
-throughput from 124 to 48 qps and raises p95 from 367ms to 1004ms. The single-client
-figure of 2.2x latency understates it; under load it is about 2.6x throughput as well.
+throughput from 130 to 39 qps and raises p95 from 375ms to 1463ms. The single-client
+figure of 2.2x latency understates it; under load it is about 3.3x throughput as well.
 
-So the recipe is conditional, not universal. 0.998 recall for ~3x memory and ~2.6x
+So the recipe is conditional, not universal. 0.996 recall for ~2.2x memory and ~3.3x
 throughput is an easy trade for a low-qps internal search and a poor one for a
 high-qps user-facing endpoint that has not been capacity-planned for it.
 
@@ -229,7 +229,8 @@ Given a btree it reads the filtered rows directly and sorts them exactly — not
 be missed, so there is no recall question at all. It is also why the 100k run never
 showed the failure: a seq scan was cheap enough there that the planner already escaped.
 
-The same query that returned 0 rows in 633ms through HNSW:
+The same query that returns 0 rows through HNSW — 2.8ms at stock settings, or 683ms
+if the recipe is applied, which buys nothing because the answer is still empty:
 
 ```
 Limit  (actual time=3.683..3.687 rows=10 loops=1)
@@ -240,8 +241,8 @@ Limit  (actual time=3.683..3.687 rows=10 loops=1)
 Execution Time: 3.722 ms
 ```
 
-10 rows, exact, in 3.7ms — measured while the host was saturated, so that is an upper
-bound. With a btree present the planner picks `bitmap+sort` at 0.1% for every layout and
+10 rows, exact, in 3.7ms — that EXPLAIN was captured while the host was saturated, so
+it is an upper bound; the same cell now measures 3.6ms on a warm cache. With a btree present the planner picks `bitmap+sort` at 0.1% for every layout and
 both query arms, returning recall 1.000 and a full 10 rows. The zero-row failure is gone.
 
 **An existence probe does not work as a predictor**, which is worth recording because it
@@ -420,16 +421,16 @@ cross-build number, not a noise floor.
 measure the residual rather than remove it, which is what produced the `within_spread`
 column above.
 
-The comparisons that matter are all within-run anyway. From one idle-host run,
+The comparisons that matter are all within-run anyway. From one run,
 `correlated`/far:
 
 | selectivity | plan | recall | p50 |
 |---|---|---|---|
-| 0.1% | bitmap+sort | 1.000 | 11.8ms |
-| 1.0% | hnsw | 0.000 | 1707ms |
+| 0.1% | bitmap+sort | 1.000 | 3.6ms |
+| 1.0% | hnsw | 0.000 | 682ms |
 
-145x slower and returns nothing, same build and same queries. That contrast held in every
-run at every magnitude.
+190x slower and returns nothing, same build and same queries. That contrast held in every
+run at every magnitude — the ratio moves with cache state, the zero does not.
 
 One anomaly worth recording rather than hiding: `multicluster`/far at 0.1% scores 0.998
 on `bitmap+sort`, and an exact plan cannot miss rows. It is one query in 50 losing a

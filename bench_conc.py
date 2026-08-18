@@ -20,7 +20,7 @@ import sys
 import threading
 import time
 
-from bench import DATA, K, QUERY, to_literal
+from bench import DATA, K, QUERY, assert_plan, set_guc, to_literal, warm_cache
 
 SEL = 1            # 0.1% — the only place the caps bind
 MST = 100_000      # gate, held above the binding point throughout
@@ -70,6 +70,30 @@ def worker(dsn, queries, smm, stop, lats, errors):
         errors.append(f"{type(e).__name__}: {e}")
 
 
+def prepare(dsn, queries, smm):
+    """Guard the plan and warm the cache before the cell is timed.
+
+    Two separate hazards. The btree indexes bench_btree.py leaves on the filter columns
+    let the planner take btree+sort at this selectivity, which would quietly turn a
+    concurrency measurement of HNSW into one of a bitmap scan — hence assert_plan, the
+    same guard every other script here uses. And with no warmup the first cell of the
+    grid reads cold, so its throughput is a fact about running first rather than about
+    scan_mem_multiplier.
+
+    Runs on its own connection that closes before the caller takes the memory baseline,
+    so none of this warmup's backend memory is charged to the cell.
+    """
+    import psycopg
+    with psycopg.connect(dsn, autocommit=True) as conn:
+        cur = conn.cursor()
+        cur.execute("LOAD 'vector'")
+        for name, val in (("hnsw.iterative_scan", MODE), ("hnsw.max_scan_tuples", MST),
+                          ("hnsw.scan_mem_multiplier", smm), ("enable_seqscan", "off")):
+            set_guc(cur, name, val)
+        assert_plan(cur, SEL, queries[0], "items_embedding_idx", f"conc/smm={smm}")
+        warm_cache(cur, QUERY, SEL, queries)
+
+
 def sampler(container, stop, peaks):
     while not stop.is_set():
         v = cgroup_anon(container)
@@ -91,8 +115,10 @@ def main(dsn, out, container):
     rows = []
     for smm in SMMS:
         for conc in CONCURRENCIES:
-            # Let the previous cell's backends exit before baselining, otherwise their
-            # memory is attributed to this cell.
+            prepare(dsn, queries, smm)
+
+            # Let the previous cell's backends, and prepare's, exit before baselining,
+            # otherwise their memory is attributed to this cell.
             time.sleep(3)
             base = cgroup_anon(container)
 
