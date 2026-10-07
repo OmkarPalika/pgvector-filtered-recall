@@ -1,24 +1,39 @@
 # pgvector filtered-recall lab
 
-Measures what happens to **pgvector recall and latency when you add a `WHERE` clause**
-to a vector search — across filter selectivity, `hnsw.ef_search`, and the
-`hnsw.iterative_scan` modes added in pgvector 0.8.
+**If your RAG or agent retrieval filters by tenant, category, user or date range,
+pgvector's HNSW index can return zero rows and report success.** No error, no warning,
+683ms.
+
+Measured recall and latency for vector search under a `WHERE` clause, across filter
+selectivity, `hnsw.ef_search`, and the `hnsw.iterative_scan` modes added in pgvector
+0.8. 1M vectors, PostgreSQL 17, 45 configurations, ground truth from an exact scan in
+the same database.
 
 ## Why this exists
 
-HNSW is an approximate index. When you combine it with a filter, Postgres searches
-the index first and applies the predicate to what comes back. If the filter is
-selective, few candidates survive and **recall silently collapses** — the query still
-returns rows, they're just the wrong ones. No error, no warning.
+The mechanism is well covered already: HNSW is approximate, Postgres searches the index
+first and applies your predicate to whatever came back, so a selective filter leaves
+few survivors and recall drops. Every write-up ends at the same three mitigations —
+raise `ef_search`, turn on `iterative_scan`, add a partial index per tenant.
 
-pgvector 0.8 added iterative index scans to mitigate this. What is not well
-documented anywhere public:
+Nobody published numbers, and the headline mitigation does not always work:
 
-- at which selectivity does recall actually fall off?
-- how much does `iterative_scan` recover, and what does it cost in p95 latency?
-- does raising `ef_search` substitute for it, or not?
+- **`iterative_scan` does not fix the correlated case.** When the filter correlates
+  with embedding position — a tenant, a category, a date range, anything that clusters
+  — a query at 0.1% selectivity returned **0 rows in 683ms**, both at stock settings
+  and with `iterative_scan` fully tuned. A btree on the filter column returned the
+  correct rows exactly, in 3.6ms.
+- **The plan flip and the silent failure are one event.** 10 rows at 0.1% selectivity,
+  0 rows at 0.2%, exactly where the planner switches from the exact plan to HNSW.
+- **`iterative_scan` is not free.** 2.2x memory per query, and throughput from 130 to
+  39 qps at concurrency 32.
+- **The crossover tracks heap pages, not row counts.** `pg_stats.correlation` on the
+  filter column moves the safe band several-fold, and a `CLUSTER` nobody ran
+  deliberately moves it under you.
 
-This repo answers those with numbers you can reproduce in one command.
+So the three questions this answers with reproducible numbers: at what selectivity does
+recall actually fall off, how much does `iterative_scan` recover and what does it cost,
+and whether raising `ef_search` substitutes for it.
 
 ## Quickstart
 
